@@ -1,8 +1,10 @@
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+const README: &str = r#"# Audits for build.rs"#;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Metadata {
@@ -46,15 +48,15 @@ fn package_metadata() -> Result<Metadata> {
         .spawn()?;
 
     let mut stdout = ps.stdout.take().expect("failed to capture stdout");
-    let mut buffer = Vec::new();
-    stdout.read_to_end(&mut buffer)?;
+    let mut out = Vec::new();
+    stdout.read_to_end(&mut out)?;
 
     let status = ps.wait()?;
     if !status.success() {
         bail!("failed to run cargo metadata");
     }
 
-    serde_json::from_slice(&buffer).map_err(|e| anyhow!("failed to parse metadata: JSON {}", e))
+    serde_json::from_slice(&out).map_err(|e| anyhow!("failed to parse metadata: {}", e))
 }
 
 fn find_build_rs(meta: &Metadata) -> Vec<&PackageMetadata> {
@@ -84,7 +86,100 @@ fn prompt_bool(msg: &str) -> Result<bool> {
     Ok(matches!(res.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
+fn make_audit_cache() -> Result<PathBuf> {
+    let audits = home::cargo_home()?.join("audits").join("build-rs");
+
+    if !audits.exists() {
+        std::fs::create_dir_all(&audits)?;
+
+        let mut ps = Command::new("git")
+            .current_dir(&audits)
+            .args(["init"])
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut stderr = ps.stderr.take().expect("failed to capture stderr");
+        let mut err = Vec::new();
+        stderr.read_to_end(&mut err)?;
+
+        let status = ps.wait()?;
+        if !status.success() {
+            bail!("failed to run git init: {:?}", std::str::from_utf8(&err));
+        }
+
+        let readme = audits.join("README.md");
+        std::fs::write(&readme, README)?;
+
+        add_file(&audits, &readme)?;
+        commit_file(&audits, &readme, "Initial files.")?;
+    }
+
+    Ok(audits)
+}
+
+fn add_file(repo_root: &Path, file: &Path) -> Result<()> {
+    let mut ps = Command::new("git")
+        .current_dir(repo_root)
+        .args(["add", file.to_string_lossy().as_ref()])
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
+    let mut err = Vec::new();
+    stderr.read_to_end(&mut err)?;
+
+    let status = ps.wait()?;
+    if !status.success() {
+        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
+    }
+
+    Ok(())
+}
+
+fn commit_file(repo_root: &Path, file: &Path, msg: &str) -> Result<()> {
+    let mut ps = Command::new("git")
+        .current_dir(repo_root)
+        .args(["commit", "-m", msg, file.to_string_lossy().as_ref()])
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
+    let mut err = Vec::new();
+    stderr.read_to_end(&mut err)?;
+
+    let status = ps.wait()?;
+    if !status.success() {
+        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
+    }
+
+    Ok(())
+}
+
+fn commit_reviewed_trust(
+    repo_root: &Path,
+    build_script: &Path,
+    pkg: &PackageMetadata,
+    trusted: bool,
+) -> Result<()> {
+    let cache = repo_root.join(format!("{}@{}", pkg.name, pkg.version));
+    let mut input = std::fs::File::open(build_script)?;
+    let mut output = std::fs::File::create(&cache)?;
+
+    std::io::copy(&mut input, &mut output)?;
+
+    let commit_msg = format!(
+        "audit-build: {}@{}, trusted: {}",
+        pkg.name, pkg.version, trusted
+    );
+    add_file(repo_root, &cache)?;
+    commit_file(repo_root, &cache, &commit_msg)?;
+
+    Ok(())
+}
+
 fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<()> {
+    let audits = make_audit_cache()?;
+
     for pkg in build_scripts {
         let build_script = pkg.build_script();
         let mut ps = Command::new(editor)
@@ -102,8 +197,8 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
                 "do you trust the build.rs file in {}@{}? [Y/n] ",
                 pkg.name, pkg.version
             );
-            let approved = prompt_bool(&msg)?;
-            println!("TODO: store approved status");
+            let trusted = prompt_bool(&msg)?;
+            commit_reviewed_trust(&audits, &build_script, pkg, trusted)?;
         }
     }
     Ok(())

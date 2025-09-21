@@ -1,10 +1,15 @@
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const README: &str = r#"# Audits for build.rs"#;
+const JSON_CACHE: &str = "cache.json";
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+struct BuildTrustStore(HashMap<String, bool>);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Metadata {
@@ -107,11 +112,14 @@ fn make_audit_cache() -> Result<PathBuf> {
             bail!("failed to run git init: {:?}", std::str::from_utf8(&err));
         }
 
-        let readme = audits.join("README.md");
-        std::fs::write(&readme, README)?;
+        let trust_cache = audits.join(JSON_CACHE);
+        std::fs::write(
+            &trust_cache,
+            serde_json::to_string_pretty(&BuildTrustStore::default())?,
+        )?;
 
-        add_file(&audits, &readme)?;
-        commit_file(&audits, &readme, "Initial files.")?;
+        add_file(&audits, &trust_cache)?;
+        commit_file(&audits, &trust_cache, "Initial files.")?;
     }
 
     Ok(audits)
@@ -162,9 +170,8 @@ fn commit_reviewed_trust(
     trusted: bool,
 ) -> Result<()> {
     let cache = repo_root.join(format!("{}@{}", pkg.name, pkg.version));
-    let mut input = std::fs::File::open(build_script)?;
-    let mut output = std::fs::File::create(&cache)?;
-
+    let mut input = File::open(build_script)?;
+    let mut output = File::create(&cache)?;
     std::io::copy(&mut input, &mut output)?;
 
     let commit_msg = format!(
@@ -177,10 +184,33 @@ fn commit_reviewed_trust(
     Ok(())
 }
 
+fn read_trust_store(repo_root: &Path) -> Result<BuildTrustStore> {
+    let path = repo_root.join(JSON_CACHE);
+    let file = File::open(&path)?;
+    Ok(serde_json::from_reader::<_, BuildTrustStore>(file)?)
+}
+
+fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
+    let path = repo_root.join(JSON_CACHE);
+    let file = OpenOptions::new().write(true).open(&path)?;
+    Ok(serde_json::to_writer::<_, BuildTrustStore>(file, ts)?)
+}
+
 fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<()> {
     let audits = make_audit_cache()?;
 
+    let mut trust_store = read_trust_store(&audits)?;
+
     for pkg in build_scripts {
+        let pkg_id = format!("{}@{}", pkg.name, pkg.version);
+
+        if let Some(entry) = trust_store.0.get(&pkg_id)
+            && *entry
+        {
+            println!("build.rs for {} is already trusted, skipping", pkg_id);
+            continue;
+        }
+
         let build_script = pkg.build_script();
         let mut ps = Command::new(editor)
             .arg(build_script.to_string_lossy().as_ref())
@@ -193,12 +223,11 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
                 status.code().unwrap_or(i32::MIN)
             );
         } else {
-            let msg = format!(
-                "do you trust the build.rs file in {}@{}? [Y/n] ",
-                pkg.name, pkg.version
-            );
+            let msg = format!("do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
             commit_reviewed_trust(&audits, &build_script, pkg, trusted)?;
+            trust_store.0.insert(pkg_id, trusted);
+            save_trust_store(&audits, &trust_store)?;
         }
     }
     Ok(())

@@ -3,7 +3,8 @@
 #![doc = include_str!("../README.md")]
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use std::process::{Command, Stdio};
 const JSON_CACHE: &str = "trust_store.json";
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct BuildTrustStore(HashMap<String, bool>);
+struct BuildTrustStore(HashMap<String, (bool, HashSet<String>)>);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Metadata {
@@ -200,7 +201,6 @@ fn commit_reviewed_trust(
     if !is_clean(repo_root)? {
         commit_file(repo_root, &cache, &commit_msg)?;
     }
-
     Ok(())
 }
 
@@ -225,14 +225,23 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
     let mut trust_store = read_trust_store(&audits)?;
     for pkg in build_scripts {
         let pkg_id = format!("{}@{}", pkg.name, pkg.version);
-        let is_trusted = trust_store.0.get(&pkg_id).cloned().unwrap_or(false);
+        let build_script = pkg.build_script();
+        let checksum = Sha256::digest(&std::fs::read(&build_script)?);
+        let digest = format!("{:0x}", &checksum);
+        println!("{} {}", build_script.display(), digest);
 
+        let is_trusted = trust_store.0.get(&digest).map(|(v, _)| *v).unwrap_or(false);
         if is_trusted {
+            let entry = trust_store.0.entry(digest).or_default();
+            if !entry.1.contains(&pkg_id) {
+                entry.1.insert(pkg_id.clone());
+                save_trust_store(&audits, &pkg_id, &trust_store)?;
+            }
+
             println!("build.rs for {} is already trusted, skipping", pkg_id);
             continue;
         }
 
-        let build_script = pkg.build_script();
         let mut ps = Command::new(editor)
             .arg(build_script.to_string_lossy().as_ref())
             .spawn()?;
@@ -247,10 +256,11 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
             let msg = format!("do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
             commit_reviewed_trust(&audits, &build_script, pkg)?;
-            if !trust_store.0.contains_key(&pkg_id) || trusted != is_trusted {
-                trust_store.0.insert(pkg_id.clone(), trusted);
-                save_trust_store(&audits, &pkg_id, &trust_store)?;
-            }
+
+            let entry = trust_store.0.entry(digest).or_default();
+            entry.0 = trusted;
+            entry.1.insert(pkg_id.clone());
+            save_trust_store(&audits, &pkg_id, &trust_store)?;
         }
     }
     Ok(())

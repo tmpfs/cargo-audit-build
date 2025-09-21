@@ -1,3 +1,4 @@
+//! Audit build.rs files in a dependency tree.
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

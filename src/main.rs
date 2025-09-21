@@ -1,4 +1,6 @@
 //! Audit build.rs files in a dependency tree.
+//!
+#![doc = include_str!("../README.md")]
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -210,17 +210,21 @@ fn read_trust_store(repo_root: &Path) -> Result<BuildTrustStore> {
     Ok(serde_json::from_reader::<_, BuildTrustStore>(file)?)
 }
 
-fn save_trust_store(repo_root: &Path, pkg_id: &str, ts: &BuildTrustStore) -> Result<()> {
+fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
     let path = repo_root.join(JSON_CACHE);
     let file = File::create(&path)?;
     serde_json::to_writer::<_, BuildTrustStore>(file, ts)?;
-    let commit_msg = format!("audit-build: update trust store for {}", pkg_id);
+    let commit_msg = format!("audit-build: update trust store");
     add_file(repo_root, &path)?;
     commit_file(repo_root, &path, &commit_msg)?;
     Ok(())
 }
 
-fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<()> {
+fn audit_build_rs(
+    build_scripts: Vec<&PackageMetadata>,
+    editor: &str,
+) -> Result<(u32, PathBuf, BuildTrustStore)> {
+    let mut num_changes = 0;
     let audits = make_audit_cache()?;
     let mut trust_store = read_trust_store(&audits)?;
     for pkg in build_scripts {
@@ -228,16 +232,14 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
         let build_script = pkg.build_script();
         let checksum = Sha256::digest(&std::fs::read(&build_script)?);
         let digest = format!("{:0x}", &checksum);
-        println!("{} {}", build_script.display(), digest);
 
         let is_trusted = trust_store.0.get(&digest).map(|(v, _)| *v).unwrap_or(false);
         if is_trusted {
             let entry = trust_store.0.entry(digest).or_default();
             if !entry.1.contains(&pkg_id) {
                 entry.1.insert(pkg_id.clone());
-                save_trust_store(&audits, &pkg_id, &trust_store)?;
+                num_changes += 1;
             }
-
             println!("build.rs for {} is already trusted, skipping", pkg_id);
             continue;
         }
@@ -260,10 +262,12 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
             let entry = trust_store.0.entry(digest).or_default();
             entry.0 = trusted;
             entry.1.insert(pkg_id.clone());
-            save_trust_store(&audits, &pkg_id, &trust_store)?;
+            if trusted != is_trusted {
+                num_changes += 1;
+            }
         }
     }
-    Ok(())
+    Ok((num_changes, audits, trust_store))
 }
 
 fn run() -> Result<()> {
@@ -273,7 +277,10 @@ fn run() -> Result<()> {
     fetch_dependencies()?;
     let meta = package_metadata()?;
     let build_scripts = find_build_rs(&meta);
-    audit_build_rs(build_scripts, &editor)?;
+    let (num_changes, repo_root, trust_store) = audit_build_rs(build_scripts, &editor)?;
+    if num_changes > 0 {
+        save_trust_store(&repo_root, &trust_store)?;
+    }
     Ok(())
 }
 

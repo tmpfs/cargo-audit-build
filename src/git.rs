@@ -1,25 +1,21 @@
+use crate::GITIGNORE;
 use anyhow::{Result, bail};
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Initialize a git repository.
 pub fn init_repo(repo_root: &Path) -> Result<()> {
-    std::fs::create_dir_all(repo_root)?;
-
+    let log_file = crate::log_file(repo_root)?;
     let mut ps = Command::new("git")
         .current_dir(repo_root)
         .args(["init"])
-        .stderr(Stdio::piped())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
         .spawn()?;
-
-    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-    let mut err = Vec::new();
-    stderr.read_to_end(&mut err)?;
 
     let status = ps.wait()?;
     if !status.success() {
-        bail!("failed to run git init: {:?}", std::str::from_utf8(&err));
+        bail!("failed to run git init");
     }
 
     let trust_cache = repo_root.join(crate::JSON_CACHE);
@@ -28,27 +24,31 @@ pub fn init_repo(repo_root: &Path) -> Result<()> {
         serde_json::to_string_pretty(&crate::BuildTrustStore::default())?,
     )?;
 
+    let git_ignore = repo_root.join(".gitignore");
+    std::fs::write(&git_ignore, GITIGNORE)?;
+
+    add_file(repo_root, &git_ignore)?;
+    commit_file(repo_root, &git_ignore, "Initial .gitignore.")?;
+
     add_file(repo_root, &trust_cache)?;
-    commit_file(repo_root, &trust_cache, "Initial files.")?;
+    commit_file(repo_root, &trust_cache, "Initial trust store.")?;
 
     Ok(())
 }
 
 /// Add a file to a git repository.
 pub fn add_file(repo_root: &Path, file: &Path) -> Result<()> {
+    let log_file = crate::log_file(repo_root)?;
     let mut ps = Command::new("git")
         .current_dir(repo_root)
         .args(["add", file.to_string_lossy().as_ref()])
-        .stderr(Stdio::piped())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
         .spawn()?;
-
-    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-    let mut err = Vec::new();
-    stderr.read_to_end(&mut err)?;
 
     let status = ps.wait()?;
     if !status.success() {
-        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
+        bail!("failed to run git add");
     }
 
     Ok(())
@@ -56,19 +56,18 @@ pub fn add_file(repo_root: &Path, file: &Path) -> Result<()> {
 
 /// Commit a file to a git repository.
 pub fn commit_file(repo_root: &Path, file: &Path, msg: &str) -> Result<()> {
+    let log_file = crate::log_file(repo_root)?;
+
     let mut ps = Command::new("git")
         .current_dir(repo_root)
         .args(["commit", "-m", msg, file.to_string_lossy().as_ref()])
-        .stderr(Stdio::piped())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
         .spawn()?;
-
-    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-    let mut err = Vec::new();
-    stderr.read_to_end(&mut err)?;
 
     let status = ps.wait()?;
     if !status.success() {
-        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
+        bail!("failed to run git commit");
     }
 
     Ok(())
@@ -76,9 +75,11 @@ pub fn commit_file(repo_root: &Path, file: &Path, msg: &str) -> Result<()> {
 
 /// Check if a repository is clean.
 pub fn is_clean(repo_root: &Path) -> Result<bool> {
+    let log_file = crate::log_file(repo_root)?;
     Ok(Command::new("git")
         .current_dir(repo_root)
         .args(["status", "--porcelain"])
+        .stderr(log_file)
         .output()?
         .stdout
         .is_empty())

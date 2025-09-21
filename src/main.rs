@@ -4,13 +4,14 @@ use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use cargo_audit_build::{
     BuildTrustStore, JSON_CACHE, PackageMetadata,
     cargo::{fetch_dependencies, find_build_rs, package_metadata},
     git::{add_file, commit_file, init_repo, is_clean},
+    repository,
 };
 
 fn prompt(msg: &str) -> Result<String> {
@@ -26,15 +27,7 @@ fn prompt_bool(msg: &str) -> Result<bool> {
     Ok(matches!(res.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-fn make_audit_cache() -> Result<PathBuf> {
-    let repo_root = home::cargo_home()?.join("audits").join("build-rs");
-    if !repo_root.exists() {
-        init_repo(&repo_root)?;
-    }
-    Ok(repo_root)
-}
-
-fn commit_reviewed_trust(
+fn commit_reviewed_build_script(
     repo_root: &Path,
     build_script: &Path,
     pkg: &PackageMetadata,
@@ -54,12 +47,14 @@ fn commit_reviewed_trust(
 
 fn read_trust_store(repo_root: &Path) -> Result<BuildTrustStore> {
     let path = repo_root.join(JSON_CACHE);
+    log::debug!("read trust store: {}", path.display());
     let file = File::open(&path)?;
     Ok(serde_json::from_reader::<_, BuildTrustStore>(file)?)
 }
 
 fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
     let path = repo_root.join(JSON_CACHE);
+    log::debug!("save trust store: {}", path.display());
     let file = File::create(&path)?;
     serde_json::to_writer::<_, BuildTrustStore>(file, ts)?;
     let commit_msg = "audit-build: update trust store";
@@ -69,15 +64,21 @@ fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
 }
 
 fn audit_build_rs(
+    repo_root: &Path,
     build_scripts: Vec<&PackageMetadata>,
     editor: &str,
-) -> Result<(u32, PathBuf, BuildTrustStore)> {
+) -> Result<(u32, BuildTrustStore)> {
+    log::debug!("start audit: {}", repo_root.display());
     let mut num_changes = 0;
-    let audits = make_audit_cache()?;
-    let mut trust_store = read_trust_store(&audits)?;
+    if !repo_root.join(".git").exists() {
+        log::debug!("init repository: {}", repo_root.display());
+        init_repo(repo_root)?;
+    }
+    let mut trust_store = read_trust_store(repo_root)?;
     for pkg in build_scripts {
         let pkg_id = format!("{}@{}", pkg.name, pkg.version);
         let build_script = pkg.build_script();
+        log::debug!("build script for {} is {}", pkg_id, build_script.display());
         let checksum = Sha256::digest(&std::fs::read(&build_script)?);
         let digest = format!("{:0x}", &checksum);
 
@@ -105,7 +106,7 @@ fn audit_build_rs(
         } else {
             let msg = format!("Do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
-            commit_reviewed_trust(&audits, &build_script, pkg)?;
+            commit_reviewed_build_script(repo_root, &build_script, pkg)?;
 
             let entry = trust_store.0.entry(digest).or_default();
             entry.0 = trusted;
@@ -115,17 +116,21 @@ fn audit_build_rs(
             }
         }
     }
-    Ok((num_changes, audits, trust_store))
+    Ok((num_changes, trust_store))
 }
 
 fn run() -> Result<()> {
     let Ok(editor) = std::env::var("EDITOR") else {
         bail!("the EDITOR environment variable must be set");
     };
-    fetch_dependencies()?;
-    let meta = package_metadata()?;
+
+    let repo_root = crate::repository()?;
+    std::fs::create_dir_all(&repo_root)?;
+
+    fetch_dependencies(&repo_root)?;
+    let meta = package_metadata(&repo_root)?;
     let build_scripts = find_build_rs(&meta);
-    let (num_changes, repo_root, trust_store) = audit_build_rs(build_scripts, &editor)?;
+    let (num_changes, trust_store) = audit_build_rs(&repo_root, build_scripts, &editor)?;
     if num_changes > 0 {
         save_trust_store(&repo_root, &trust_store)?;
     }

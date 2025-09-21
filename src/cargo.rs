@@ -1,12 +1,18 @@
+use crate::{Metadata, PackageMetadata};
 use anyhow::{Result, anyhow, bail};
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::{Metadata, PackageMetadata};
-
 /// Fetch dependencies.
-pub fn fetch_dependencies() -> Result<()> {
-    let mut ps = Command::new("cargo").arg("fetch").spawn()?;
+pub fn fetch_dependencies(repo_root: &Path) -> Result<()> {
+    log::debug!("fetch dependencies");
+    let log_file = crate::log_file(repo_root)?;
+    let mut ps = Command::new("cargo")
+        .arg("fetch")
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
     let status = ps.wait()?;
     if !status.success() {
         bail!("failed to fetch dependencies");
@@ -15,10 +21,13 @@ pub fn fetch_dependencies() -> Result<()> {
 }
 
 /// Get package metadata.
-pub fn package_metadata() -> Result<Metadata> {
+pub fn package_metadata(repo_root: &Path) -> Result<Metadata> {
+    log::debug!("package metadata");
+    let log_file = crate::log_file(repo_root)?;
     let mut ps = Command::new("cargo")
         .args(["metadata", "--format-version=1"])
         .stdout(Stdio::piped())
+        .stderr(log_file)
         .spawn()?;
 
     let mut stdout = ps.stdout.take().expect("failed to capture stdout");
@@ -35,6 +44,7 @@ pub fn package_metadata() -> Result<Metadata> {
 
 /// Find all the custom build scripts.
 pub fn find_build_rs(meta: &Metadata) -> Vec<&PackageMetadata> {
+    log::debug!("find build.rs files");
     let mut out = Vec::new();
     for pkg in &meta.packages {
         if pkg

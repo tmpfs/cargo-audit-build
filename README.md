@@ -21,6 +21,10 @@ The program will ask you after viewing each `build.rs` file whether you trust it
 * The `EDITOR` environment variable must be set.
 * The `git` executable.
 
+## Bugs
+
+* Iterates all `build.rs` files even for targets that you may not intend to compile for.
+
 ## License
 
 MIT or Apache-2.0

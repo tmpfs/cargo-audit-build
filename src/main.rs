@@ -1,12 +1,12 @@
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const JSON_CACHE: &str = "cache.json";
+const JSON_CACHE: &str = "trust_store.json";
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 struct BuildTrustStore(HashMap<String, bool>);
@@ -209,7 +209,7 @@ fn read_trust_store(repo_root: &Path) -> Result<BuildTrustStore> {
 
 fn save_trust_store(repo_root: &Path, pkg_id: &str, ts: &BuildTrustStore) -> Result<()> {
     let path = repo_root.join(JSON_CACHE);
-    let file = OpenOptions::new().write(true).open(&path)?;
+    let file = File::create(&path)?;
     serde_json::to_writer::<_, BuildTrustStore>(file, ts)?;
     let commit_msg = format!("audit-build: update trust store for {}", pkg_id);
     add_file(repo_root, &path)?;
@@ -244,8 +244,7 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
             let msg = format!("do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
             commit_reviewed_trust(&audits, &build_script, pkg)?;
-
-            if trusted != is_trusted {
+            if !trust_store.0.contains_key(&pkg_id) || trusted != is_trusted {
                 trust_store.0.insert(pkg_id.clone(), trusted);
                 save_trust_store(&audits, &pkg_id, &trust_store)?;
             }

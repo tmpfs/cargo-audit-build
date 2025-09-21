@@ -1,6 +1,6 @@
 # Audit build.rs files
 
-Tool for auditing cargo build.rs files to help mitigate supply chain attacks.
+Workflow for auditing cargo build.rs files to help mitigate supply chain attacks.
 
 The idea is simple; after running `cargo add|update` run `cargo audit-build` **before** running `cargo build|check|test|run|bench|doc|install|package`.
 

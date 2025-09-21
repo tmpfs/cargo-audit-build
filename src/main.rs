@@ -219,9 +219,7 @@ fn save_trust_store(repo_root: &Path, pkg_id: &str, ts: &BuildTrustStore) -> Res
 
 fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<()> {
     let audits = make_audit_cache()?;
-
     let mut trust_store = read_trust_store(&audits)?;
-
     for pkg in build_scripts {
         let pkg_id = format!("{}@{}", pkg.name, pkg.version);
         let is_trusted = trust_store.0.get(&pkg_id).cloned().unwrap_or(false);

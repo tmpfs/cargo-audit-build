@@ -26,15 +26,23 @@ struct PackageMetadata {
 
 impl PackageMetadata {
     fn build_script(&self) -> PathBuf {
-        let mut path = PathBuf::from(&self.manifest_path);
-        path.set_file_name("build.rs");
-        path
+        self.targets
+            .iter()
+            .find_map(|t| {
+                if t.kind.contains(&"custom-build".to_owned()) {
+                    Some(PathBuf::from(&t.src_path))
+                } else {
+                    None
+                }
+            })
+            .expect("to find build script in src_path")
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PackageTarget {
     kind: Vec<String>,
+    src_path: String,
 }
 
 fn fetch_dependencies() -> Result<()> {
@@ -163,23 +171,32 @@ fn commit_file(repo_root: &Path, file: &Path, msg: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_clean(repo_root: &Path) -> Result<bool> {
+    Ok(Command::new("git")
+        .current_dir(repo_root)
+        .args(["status", "--porcelain"])
+        .output()?
+        .stdout
+        .is_empty())
+
+    // git status --porcelain
+}
+
 fn commit_reviewed_trust(
     repo_root: &Path,
     build_script: &Path,
     pkg: &PackageMetadata,
-    trusted: bool,
 ) -> Result<()> {
     let cache = repo_root.join(format!("{}@{}", pkg.name, pkg.version));
     let mut input = File::open(build_script)?;
     let mut output = File::create(&cache)?;
     std::io::copy(&mut input, &mut output)?;
 
-    let commit_msg = format!(
-        "audit-build: {}@{}, trusted: {}",
-        pkg.name, pkg.version, trusted
-    );
+    let commit_msg = format!("audit-build: add build.rs for {}@{}", pkg.name, pkg.version,);
     add_file(repo_root, &cache)?;
-    commit_file(repo_root, &cache, &commit_msg)?;
+    if !is_clean(repo_root)? {
+        commit_file(repo_root, &cache, &commit_msg)?;
+    }
 
     Ok(())
 }
@@ -190,10 +207,14 @@ fn read_trust_store(repo_root: &Path) -> Result<BuildTrustStore> {
     Ok(serde_json::from_reader::<_, BuildTrustStore>(file)?)
 }
 
-fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
+fn save_trust_store(repo_root: &Path, pkg_id: &str, ts: &BuildTrustStore) -> Result<()> {
     let path = repo_root.join(JSON_CACHE);
     let file = OpenOptions::new().write(true).open(&path)?;
-    Ok(serde_json::to_writer::<_, BuildTrustStore>(file, ts)?)
+    serde_json::to_writer::<_, BuildTrustStore>(file, ts)?;
+    let commit_msg = format!("audit-build: update trust store for {}", pkg_id);
+    add_file(repo_root, &path)?;
+    commit_file(repo_root, &path, &commit_msg)?;
+    Ok(())
 }
 
 fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<()> {
@@ -203,10 +224,9 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
 
     for pkg in build_scripts {
         let pkg_id = format!("{}@{}", pkg.name, pkg.version);
+        let is_trusted = trust_store.0.get(&pkg_id).cloned().unwrap_or(false);
 
-        if let Some(entry) = trust_store.0.get(&pkg_id)
-            && *entry
-        {
+        if is_trusted {
             println!("build.rs for {} is already trusted, skipping", pkg_id);
             continue;
         }
@@ -225,9 +245,12 @@ fn audit_build_rs(build_scripts: Vec<&PackageMetadata>, editor: &str) -> Result<
         } else {
             let msg = format!("do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
-            commit_reviewed_trust(&audits, &build_script, pkg, trusted)?;
-            trust_store.0.insert(pkg_id, trusted);
-            save_trust_store(&audits, &trust_store)?;
+            commit_reviewed_trust(&audits, &build_script, pkg)?;
+
+            if trusted != is_trusted {
+                trust_store.0.insert(pkg_id.clone(), trusted);
+                save_trust_store(&audits, &pkg_id, &trust_store)?;
+            }
         }
     }
     Ok(())

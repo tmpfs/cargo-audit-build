@@ -1,94 +1,17 @@
 //! Audit build.rs files in a dependency tree.
-//!
 #![doc = include_str!("../README.md")]
-use anyhow::{Result, anyhow, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-const JSON_CACHE: &str = "trust_store.json";
-
-#[derive(Default, Debug, Serialize, Deserialize)]
-struct BuildTrustStore(HashMap<String, (bool, HashSet<String>)>);
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Metadata {
-    packages: Vec<PackageMetadata>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PackageMetadata {
-    name: String,
-    version: String,
-    targets: Vec<PackageTarget>,
-    manifest_path: String,
-}
-
-impl PackageMetadata {
-    fn build_script(&self) -> PathBuf {
-        self.targets
-            .iter()
-            .find_map(|t| {
-                if t.kind.contains(&"custom-build".to_owned()) {
-                    Some(PathBuf::from(&t.src_path))
-                } else {
-                    None
-                }
-            })
-            .expect("to find build script in src_path")
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PackageTarget {
-    kind: Vec<String>,
-    src_path: String,
-}
-
-fn fetch_dependencies() -> Result<()> {
-    let mut ps = Command::new("cargo").arg("fetch").spawn()?;
-    let status = ps.wait()?;
-    if !status.success() {
-        bail!("failed to fetch dependencies");
-    }
-    Ok(())
-}
-
-fn package_metadata() -> Result<Metadata> {
-    let mut ps = Command::new("cargo")
-        .args(["metadata", "--format-version=1"])
-        .stdout(Stdio::piped())
-        .spawn()?;
-
-    let mut stdout = ps.stdout.take().expect("failed to capture stdout");
-    let mut out = Vec::new();
-    stdout.read_to_end(&mut out)?;
-
-    let status = ps.wait()?;
-    if !status.success() {
-        bail!("failed to run cargo metadata");
-    }
-
-    serde_json::from_slice(&out).map_err(|e| anyhow!("failed to parse metadata: {}", e))
-}
-
-fn find_build_rs(meta: &Metadata) -> Vec<&PackageMetadata> {
-    let mut out = Vec::new();
-    for pkg in &meta.packages {
-        if pkg
-            .targets
-            .iter()
-            .any(|t| t.kind.contains(&"custom-build".to_owned()))
-        {
-            out.push(pkg);
-        }
-    }
-    out
-}
+use cargo_audit_build::{
+    BuildTrustStore, JSON_CACHE, PackageMetadata,
+    cargo::{fetch_dependencies, find_build_rs, package_metadata},
+    git::{add_file, commit_file, init_repo, is_clean},
+};
 
 fn prompt(msg: &str) -> Result<String> {
     print!("{}", msg);
@@ -104,86 +27,11 @@ fn prompt_bool(msg: &str) -> Result<bool> {
 }
 
 fn make_audit_cache() -> Result<PathBuf> {
-    let audits = home::cargo_home()?.join("audits").join("build-rs");
-
-    if !audits.exists() {
-        std::fs::create_dir_all(&audits)?;
-
-        let mut ps = Command::new("git")
-            .current_dir(&audits)
-            .args(["init"])
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-        let mut err = Vec::new();
-        stderr.read_to_end(&mut err)?;
-
-        let status = ps.wait()?;
-        if !status.success() {
-            bail!("failed to run git init: {:?}", std::str::from_utf8(&err));
-        }
-
-        let trust_cache = audits.join(JSON_CACHE);
-        std::fs::write(
-            &trust_cache,
-            serde_json::to_string_pretty(&BuildTrustStore::default())?,
-        )?;
-
-        add_file(&audits, &trust_cache)?;
-        commit_file(&audits, &trust_cache, "Initial files.")?;
+    let repo_root = home::cargo_home()?.join("audits").join("build-rs");
+    if !repo_root.exists() {
+        init_repo(&repo_root)?;
     }
-
-    Ok(audits)
-}
-
-fn add_file(repo_root: &Path, file: &Path) -> Result<()> {
-    let mut ps = Command::new("git")
-        .current_dir(repo_root)
-        .args(["add", file.to_string_lossy().as_ref()])
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-    let mut err = Vec::new();
-    stderr.read_to_end(&mut err)?;
-
-    let status = ps.wait()?;
-    if !status.success() {
-        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
-    }
-
-    Ok(())
-}
-
-fn commit_file(repo_root: &Path, file: &Path, msg: &str) -> Result<()> {
-    let mut ps = Command::new("git")
-        .current_dir(repo_root)
-        .args(["commit", "-m", msg, file.to_string_lossy().as_ref()])
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stderr = ps.stderr.take().expect("failed to capture stderr");
-    let mut err = Vec::new();
-    stderr.read_to_end(&mut err)?;
-
-    let status = ps.wait()?;
-    if !status.success() {
-        bail!("failed to run git commit: {:?}", std::str::from_utf8(&err));
-    }
-
-    Ok(())
-}
-
-fn is_clean(repo_root: &Path) -> Result<bool> {
-    Ok(Command::new("git")
-        .current_dir(repo_root)
-        .args(["status", "--porcelain"])
-        .output()?
-        .stdout
-        .is_empty())
-
-    // git status --porcelain
+    Ok(repo_root)
 }
 
 fn commit_reviewed_trust(
@@ -214,9 +62,9 @@ fn save_trust_store(repo_root: &Path, ts: &BuildTrustStore) -> Result<()> {
     let path = repo_root.join(JSON_CACHE);
     let file = File::create(&path)?;
     serde_json::to_writer::<_, BuildTrustStore>(file, ts)?;
-    let commit_msg = format!("audit-build: update trust store");
+    let commit_msg = "audit-build: update trust store";
     add_file(repo_root, &path)?;
-    commit_file(repo_root, &path, &commit_msg)?;
+    commit_file(repo_root, &path, commit_msg)?;
     Ok(())
 }
 
@@ -240,7 +88,7 @@ fn audit_build_rs(
                 entry.1.insert(pkg_id.clone());
                 num_changes += 1;
             }
-            println!("build.rs for {} is already trusted, skipping", pkg_id);
+            log::info!("build.rs for {} is already trusted, skipping", pkg_id);
             continue;
         }
 
@@ -255,7 +103,7 @@ fn audit_build_rs(
                 status.code().unwrap_or(i32::MIN)
             );
         } else {
-            let msg = format!("do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
+            let msg = format!("Do you trust the build.rs file in {}? [Y/n] ", &pkg_id);
             let trusted = prompt_bool(&msg)?;
             commit_reviewed_trust(&audits, &build_script, pkg)?;
 
@@ -285,8 +133,13 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    use env_logger::Env;
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .format_target(false)
+        .init();
     if let Err(e) = run() {
-        eprintln!("{}", e);
+        log::error!("{}", e);
         std::process::exit(1);
     }
 }

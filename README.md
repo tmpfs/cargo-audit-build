@@ -10,6 +10,10 @@ The idea is simple; before running `cargo install` or `cargo update` first run `
 cargo install cargo-build-audit
 ```
 
+## Requirements
+
+* The `EDITOR` environment variable must be set
+
 ## License
 
 MIT or Apache-2.0

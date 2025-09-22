@@ -32,7 +32,7 @@ fn commit_reviewed_build_script(
     build_script: &Path,
     pkg: &PackageMetadata,
 ) -> Result<()> {
-    let cache = repo_root.join(format!("{}@{}", pkg.name, pkg.version));
+    let cache = repo_root.join(format!("{}@{}.rs", pkg.name, pkg.version));
     let mut input = File::open(build_script)?;
     let mut output = File::create(&cache)?;
     std::io::copy(&mut input, &mut output)?;

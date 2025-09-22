@@ -1,6 +1,6 @@
 [package]
 name = "cargo-audit-build"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Audit cargo build.rs files"
 license = "MIT OR Apache-2.0"

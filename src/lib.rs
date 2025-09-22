@@ -20,7 +20,7 @@ pub fn log_file(repo_root: &Path) -> Result<File> {
 
 /// Repository for the trust cache and build.rs files.
 pub fn repository() -> Result<PathBuf> {
-    Ok(home::cargo_home()?.join("audits").join("build-rs"))
+    Ok(home::cargo_home()?.join("audits").join("build_scripts"))
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]

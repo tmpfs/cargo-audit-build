@@ -14,9 +14,9 @@ cargo install cargo-audit-build
 
 ## How it works
 
-The program will ask you after viewing each `build.rs` file whether you trust it and your response is then stored in the `~/.cargo/audits/build-rs` folder so that you don't need to re-review build files that have already been trusted. Each `build.rs` file is committed to the audits repository to track the contents of the `build.rs` files that have been reviewed. 
+The program will ask you after viewing each `build.rs` file whether you trust it and your response is then stored in the `~/.cargo/audits/build_scripts` folder so that you don't need to re-review build files that have already been trusted. Each `build.rs` file is committed to the audits repository to track the contents of the `build.rs` files that have been reviewed. 
 
-The `~/.cargo/audits/build-rs` folder is a git repository so it can easily be shared between your machines and/or team members. 
+The `~/.cargo/audits/build_scripts` folder is a git repository so it can easily be shared between your machines and/or team members. 
 
 ## Requirements
 
